@@ -1,0 +1,24 @@
+{
+  "dataset_dir": "/home/alan/Workspace/enger/test-tts/datasets/cosrigel_north_female",
+  "output_dir": "/home/alan/Workspace/enger/test-tts/finetune/manifests",
+  "min_duration": 3.0,
+  "max_duration": 30.0,
+  "ref_audio_ratio": 0.4,
+  "seed": 42,
+  "train": {
+    "raw_rows": 461,
+    "kept_rows": 460,
+    "dropped_too_short": 1,
+    "dropped_too_long": 0,
+    "missing_rows": 0,
+    "with_ref_audio": 178
+  },
+  "val": {
+    "raw_rows": 25,
+    "kept_rows": 24,
+    "dropped_too_short": 1,
+    "dropped_too_long": 0,
+    "missing_rows": 0,
+    "with_ref_audio": 8
+  }
+}

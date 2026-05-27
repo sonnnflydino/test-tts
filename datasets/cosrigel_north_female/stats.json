@@ -1,0 +1,10 @@
+{
+  "dataset": "cosrigel/vn_tts_medium_clean",
+  "source": "1",
+  "samples": 486,
+  "train_samples": 461,
+  "val_samples": 25,
+  "total_seconds": 12020.149999999987,
+  "total_hours": 3.3389305555555517,
+  "reference_file": "00476.wav"
+}

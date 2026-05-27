@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Lightning runs this from $HOME/.lightning_studio/on_stop.sh when the Studio sleeps/stops.
+# The official VoxCPM training script already traps SIGTERM/SIGINT and saves `latest/`.
+
+pkill -TERM -f "train_voxcpm_finetune.py" || true
+sleep 20

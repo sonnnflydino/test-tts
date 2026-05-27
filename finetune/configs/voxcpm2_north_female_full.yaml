@@ -1,0 +1,28 @@
+pretrained_path: openbmb/VoxCPM2
+
+train_manifest: finetune/manifests/train.jsonl
+val_manifest: finetune/manifests/val.jsonl
+
+sample_rate: 16000
+out_sample_rate: 48000
+batch_size: 1
+grad_accum_steps: 16
+num_workers: 2
+num_iters: 1000
+log_interval: 10
+valid_interval: 250
+save_interval: 250
+
+learning_rate: 0.00001
+weight_decay: 0.01
+warmup_steps: 100
+max_steps: 1000
+max_batch_tokens: 8192
+max_grad_norm: 1.0
+
+save_path: finetune/checkpoints/north_female_full
+tensorboard: finetune/tensorboard/north_female_full
+
+lambdas:
+  loss/diff: 1.0
+  loss/stop: 1.0
