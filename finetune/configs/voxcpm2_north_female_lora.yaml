@@ -19,7 +19,7 @@ learning_rate: 0.0001
 weight_decay: 0.01
 warmup_steps: 100
 max_steps: 1500
-max_batch_tokens: 4096  # giảm từ 8192 → 4096 để giảm peak VRAM
+max_batch_tokens: 1536  # T4 14.5GB: giảm mạnh để fit activation memory (seq² attention)
 max_grad_norm: 1.0
 
 save_path: finetune/checkpoints/north_female_lora
@@ -33,6 +33,6 @@ lora:
   enable_lm: true
   enable_dit: true
   enable_proj: false
-  r: 16      # giảm từ 32 → 16 để tiết kiệm VRAM (~1-2 GB)
-  alpha: 16  # giữ alpha = r
+  r: 8       # giảm từ 16 → 8 để tiết kiệm optimizer state VRAM
+  alpha: 16  # alpha > r để giữ effective learning rate
   dropout: 0.0
