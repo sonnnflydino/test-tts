@@ -67,12 +67,68 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+_NONLOCAL_BUG_OLD = (
+    "    data_epoch = 0\n"
+    "    train_iter = iter(train_loader)\n"
+    "\n"
+    "    def get_next_batch():\n"
+    '        """Get next batch, handles epoch boundary and DistributedSampler."""\n'
+    "        nonlocal train_iter, data_epoch\n"
+    "        try:\n"
+    "            return next(train_iter)\n"
+    "        except StopIteration:\n"
+    "            data_epoch += 1\n"
+    "            # Key: set DistributedSampler epoch to ensure different data order each epoch\n"
+    "            sampler = getattr(train_loader, \"sampler\", None)\n"
+    "            if hasattr(sampler, \"set_epoch\"):\n"
+    "                sampler.set_epoch(data_epoch)\n"
+    "            train_iter = iter(train_loader)\n"
+    "            return next(train_iter)\n"
+)
+
+_NONLOCAL_BUG_NEW = (
+    "    # nonlocal workaround: use mutable dict so nested function can close over it\n"
+    "    _iter_state = {\"data_epoch\": 0, \"train_iter\": iter(train_loader)}\n"
+    "\n"
+    "    def get_next_batch():\n"
+    '        """Get next batch, handles epoch boundary and DistributedSampler."""\n'
+    "        try:\n"
+    "            return next(_iter_state[\"train_iter\"])\n"
+    "        except StopIteration:\n"
+    "            _iter_state[\"data_epoch\"] += 1\n"
+    "            # Key: set DistributedSampler epoch to ensure different data order each epoch\n"
+    "            sampler = getattr(train_loader, \"sampler\", None)\n"
+    "            if hasattr(sampler, \"set_epoch\"):\n"
+    "                sampler.set_epoch(_iter_state[\"data_epoch\"])\n"
+    "            _iter_state[\"train_iter\"] = iter(train_loader)\n"
+    "            return next(_iter_state[\"train_iter\"])\n"
+)
+
+
+def _fix_nonlocal_bug(script_path: Path) -> None:
+    """Thay thế nonlocal pattern bằng dict-based closure để tránh SyntaxError trên Python 3.12."""
+    source = script_path.read_text(encoding="utf-8")
+    if "nonlocal train_iter, data_epoch" not in source:
+        return  # không có bug, bỏ qua
+    if _NONLOCAL_BUG_OLD not in source:
+        # Bug có nhưng format khác — fallback: chỉ xóa dòng nonlocal
+        print("[FIX] nonlocal pattern differs from expected; removing the nonlocal line only.")
+        fixed = source.replace(
+            "        nonlocal train_iter, data_epoch\n", "", 1
+        )
+    else:
+        fixed = source.replace(_NONLOCAL_BUG_OLD, _NONLOCAL_BUG_NEW, 1)
+    script_path.write_text(fixed, encoding="utf-8")
+    print(f"[FIX] Patched nonlocal bug in {script_path.name}")
+
+
 def ensure_upstream_script(script_path: Path, refresh: bool) -> None:
     if script_path.exists() and not refresh:
         return
     script_path.parent.mkdir(parents=True, exist_ok=True)
     with urllib.request.urlopen(UPSTREAM_TRAIN_SCRIPT_URL, timeout=60) as response:
         script_path.write_bytes(response.read())
+    _fix_nonlocal_bug(script_path)
 
 
 def resolve_config_paths(config: dict, repo_root: Path, cache_dir: Path) -> dict:
