@@ -6,14 +6,10 @@ import json
 import os
 import shutil
 import time
-import urllib.parse
-import urllib.request
 import wave
 from pathlib import Path
 
 DATASET_ID = "cosrigel/vn_tts_medium_clean"
-ROWS_API = "https://datasets-server.huggingface.co/rows"
-REQUEST_RETRIES = 5
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,12 +28,6 @@ def parse_args() -> argparse.Namespace:
         help='Speaker source id. "1" is female north according to the dataset card.',
     )
     parser.add_argument(
-        "--page-size",
-        type=int,
-        default=100,
-        help="Rows to fetch per page from the dataset server.",
-    )
-    parser.add_argument(
         "--val-every",
         type=int,
         default=20,
@@ -50,46 +40,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap for quick tests. 0 means download all matching rows.",
     )
     return parser.parse_args()
-
-
-def fetch_rows(offset: int, length: int) -> list[dict]:
-    query = urllib.parse.urlencode(
-        {
-            "dataset": DATASET_ID,
-            "config": "default",
-            "split": "train",
-            "offset": offset,
-            "length": length,
-        }
-    )
-    url = f"{ROWS_API}?{query}"
-    for attempt in range(1, REQUEST_RETRIES + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                payload = json.load(response)
-            return [row["row"] for row in payload["rows"]]
-        except Exception as exc:
-            if attempt == REQUEST_RETRIES:
-                raise RuntimeError(f"Failed to fetch rows at offset={offset}") from exc
-            time.sleep(attempt)
-    return []
-
-
-def download_file(url: str, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = destination.with_suffix(".tmp")
-    for attempt in range(1, REQUEST_RETRIES + 1):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                with temp_path.open("wb") as output:
-                    shutil.copyfileobj(response, output)
-            temp_path.replace(destination)
-            return
-        except Exception as exc:
-            temp_path.unlink(missing_ok=True)
-            if attempt == REQUEST_RETRIES:
-                raise RuntimeError(f"Failed to download audio to {destination}") from exc
-            time.sleep(attempt)
 
 
 def wav_duration_seconds(path: Path) -> float:
@@ -123,6 +73,42 @@ def create_reference_symlink(output_dir: Path, record: dict | None) -> None:
     (output_dir / "reference.txt").write_text(record["text"], encoding="utf-8")
 
 
+def save_audio(audio_data: dict, destination: Path) -> None:
+    """Save audio từ HuggingFace datasets format ra WAV file."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    # Trường hợp 1: raw bytes (thường với streaming)
+    if isinstance(audio_data, dict) and audio_data.get("bytes"):
+        destination.write_bytes(audio_data["bytes"])
+        return
+
+    # Trường hợp 2: decoded numpy array
+    if isinstance(audio_data, dict) and "array" in audio_data:
+        try:
+            import soundfile as sf  # type: ignore
+            sf.write(str(destination), audio_data["array"], audio_data["sampling_rate"])
+            return
+        except ImportError:
+            pass
+        try:
+            import scipy.io.wavfile as wavfile  # type: ignore
+            import numpy as np
+            arr = audio_data["array"]
+            sr = audio_data["sampling_rate"]
+            # soundfile not available — use scipy, convert float→int16
+            if arr.dtype.kind == "f":
+                arr = (arr * 32767).clip(-32768, 32767).astype(np.int16)
+            wavfile.write(str(destination), sr, arr)
+            return
+        except ImportError:
+            pass
+
+    raise RuntimeError(
+        f"Cannot save audio to {destination}: "
+        "install soundfile (`pip install soundfile`) or scipy."
+    )
+
+
 def main() -> None:
     args = parse_args()
     output_dir = args.output_dir
@@ -130,59 +116,62 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
 
+    # Import datasets lazily để script vẫn chạy được khi không có thư viện
+    try:
+        from datasets import load_dataset  # type: ignore
+    except ImportError as exc:
+        raise SystemExit(
+            "Thư viện `datasets` chưa được cài. Chạy: pip install datasets"
+        ) from exc
+
+    print(f"Loading dataset {DATASET_ID} (streaming)...")
+    ds = load_dataset(
+        DATASET_ID,
+        split="train",
+        streaming=True,
+        trust_remote_code=False,
+    )
+
     records: list[dict] = []
     downloaded = 0
-    offset = 0
-    page = 0
 
-    while True:
-        rows = fetch_rows(offset=offset, length=args.page_size)
-        if not rows:
-            break
+    for row in ds:
+        row_source = str(row.get("source", "")).strip()
+        if row_source != args.source:
+            continue
 
-        for row in rows:
-            if row["source"] != args.source:
+        downloaded += 1
+        file_name = f"{downloaded:05d}.wav"
+        destination = audio_dir / file_name
+
+        if not destination.exists():
+            audio_data = row.get("audio")
+            if audio_data is None:
+                print(f"[WARN] Row {downloaded} has no audio field, skipping.")
+                downloaded -= 1
                 continue
+            save_audio(audio_data, destination)
 
-            downloaded += 1
-            file_name = f"{downloaded:05d}.wav"
-            destination = audio_dir / file_name
-            audio_url = row["audio"][0]["src"]
-            text = " ".join(row["text"].split())
+        duration_seconds = wav_duration_seconds(destination)
+        text = " ".join(row.get("text", "").split())
 
-            if not destination.exists():
-                download_file(audio_url, destination)
+        records.append(
+            {
+                "file_name": file_name,
+                "text": text,
+                "source": row_source,
+                "duration_seconds": duration_seconds,
+                "remote_url": "",
+            }
+        )
 
-            duration_seconds = wav_duration_seconds(destination)
-            records.append(
-                {
-                    "file_name": file_name,
-                    "text": text,
-                    "source": row["source"],
-                    "duration_seconds": duration_seconds,
-                    "remote_url": audio_url,
-                }
-            )
-
-            print(
-                f"[{downloaded}] saved {file_name} "
-                f"({duration_seconds:.2f}s)"
-            , flush=True)
-
-            if args.max_samples and downloaded >= args.max_samples:
-                break
-
-        page += 1
-        offset += len(rows)
-        print(f"Processed page {page}, offset now {offset}", flush=True)
+        print(
+            f"[{downloaded}] saved {file_name} ({duration_seconds:.2f}s) | {text[:60]}",
+            flush=True,
+        )
 
         if args.max_samples and downloaded >= args.max_samples:
             break
-
-        if len(rows) < args.page_size:
-            break
-
-        time.sleep(0.1)
 
     if not records:
         raise SystemExit(f"No rows matched source={args.source!r}")
@@ -191,13 +180,7 @@ def main() -> None:
     with metadata_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=[
-                "file_name",
-                "text",
-                "source",
-                "duration_seconds",
-                "remote_url",
-            ],
+            fieldnames=["file_name", "text", "source", "duration_seconds", "remote_url"],
         )
         writer.writeheader()
         writer.writerows(records)
@@ -224,10 +207,8 @@ def main() -> None:
         "total_hours": total_seconds / 3600.0,
         "reference_file": reference_record["file_name"] if reference_record else None,
     }
-    (output_dir / "stats.json").write_text(
-        json.dumps(stats, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    stats_path = output_dir / "stats.json"
+    stats_path.write_text(json.dumps(stats, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print()
     print(json.dumps(stats, indent=2, ensure_ascii=False))
