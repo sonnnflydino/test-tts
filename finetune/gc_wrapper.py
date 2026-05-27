@@ -1,68 +1,68 @@
 """
 Gradient Checkpointing Wrapper
 ================================
-Chạy upstream training script nhưng TRƯỚC ĐÓ monkey-patch VoxCPM2 để
-bật gradient checkpointing — giúp train được trên GPU < 20 GB VRAM (T4, RTX 4050...).
+Chạy upstream training script nhưng trước đó enable gradient checkpointing
+trên VoxCPM2Model bằng cách inject sitecustomize.py vào PYTHONPATH.
 
-Cách dùng (thay thế gọi trực tiếp upstream script):
-    python finetune/gc_wrapper.py <upstream_script.py> --config_path <config.yaml>
+sitecustomize.py được Python load tự động trước khi chạy bất kỳ script nào —
+không cần exec/compile file training, tránh hoàn toàn vấn đề SyntaxError.
+
+Cách dùng:
+    python finetune/gc_wrapper.py <upstream_script.py> [args...]
 """
 from __future__ import annotations
 
-import importlib
+import os
+import subprocess
 import sys
-import types
+import tempfile
 from pathlib import Path
 
+# Nội dung sitecustomize.py — sẽ được Python load tự động khi khởi động
+_SITECUSTOMIZE = '''
+# gc_wrapper: enable gradient checkpointing trên VoxCPM2Model
+try:
+    from voxcpm.model import VoxCPM2Model, VoxCPMModel
 
-def _enable_gc_on_model(model: object) -> None:
-    """Thử bật gradient checkpointing trên model hoặc sub-module của nó."""
-    candidates = [model]
-    # Thêm base_lm và base_lm.model nếu tồn tại
-    base_lm = getattr(model, "base_lm", None)
-    if base_lm is not None:
-        candidates.append(base_lm)
-        inner = getattr(base_lm, "model", None)
-        if inner is not None:
-            candidates.append(inner)
+    def _patch_class(cls):
+        orig = cls.from_local
+        # Lấy underlying function (classmethod wrapper)
+        orig_func = orig.__func__ if hasattr(orig, "__func__") else orig
 
-    for obj in candidates:
-        enable_fn = getattr(obj, "gradient_checkpointing_enable", None)
-        if callable(enable_fn):
-            try:
-                enable_fn()
-                print(
-                    f"[GC_WRAPPER] gradient_checkpointing_enable() OK on {type(obj).__name__}",
-                    flush=True,
-                )
-            except Exception as exc:
-                print(f"[GC_WRAPPER] gradient_checkpointing_enable() failed on "
-                      f"{type(obj).__name__}: {exc}", flush=True)
+        import functools
 
+        @classmethod
+        @functools.wraps(orig_func)
+        def patched_from_local(klass, *args, **kwargs):
+            model = orig_func(klass, *args, **kwargs)
+            # Thử enable GC trên model và các sub-module
+            for attr_path in [
+                [model],
+                [getattr(model, "base_lm", None)],
+                [getattr(getattr(model, "base_lm", None), "model", None)],
+            ]:
+                obj = attr_path[0]
+                if obj is not None and hasattr(obj, "gradient_checkpointing_enable"):
+                    try:
+                        obj.gradient_checkpointing_enable()
+                        print(
+                            f"[GC] gradient_checkpointing_enable OK: {type(obj).__name__}",
+                            flush=True,
+                        )
+                    except Exception as e:
+                        print(f"[GC] gradient_checkpointing_enable failed on "
+                              f"{type(obj).__name__}: {e}", flush=True)
+            return model
 
-def _patch_voxcpm2() -> None:
-    """Monkey-patch VoxCPM2.from_local để bật GC ngay sau khi model được tạo."""
-    try:
-        voxcpm_module = importlib.import_module("voxcpm.model.voxcpm2")
-    except ImportError as exc:
-        print(f"[GC_WRAPPER] Cannot import voxcpm.model.voxcpm2: {exc}", flush=True)
-        return
+        cls.from_local = patched_from_local
 
-    cls = getattr(voxcpm_module, "VoxCPM2", None)
-    if cls is None:
-        print("[GC_WRAPPER] VoxCPM2 class not found — skip patch.", flush=True)
-        return
+    _patch_class(VoxCPM2Model)
+    _patch_class(VoxCPMModel)
+    print("[GC] VoxCPM2Model + VoxCPMModel patched for gradient checkpointing.", flush=True)
 
-    original_from_local = cls.from_local
-
-    @classmethod  # type: ignore[misc]
-    def patched_from_local(klass, *args, **kwargs):  # type: ignore[override]
-        model = original_from_local.__func__(klass, *args, **kwargs)
-        _enable_gc_on_model(model)
-        return model
-
-    cls.from_local = patched_from_local
-    print("[GC_WRAPPER] VoxCPM2.from_local patched for gradient checkpointing.", flush=True)
+except Exception as _gc_err:
+    print(f"[GC] patch skipped: {_gc_err}", flush=True)
+'''
 
 
 def main() -> None:
@@ -73,17 +73,22 @@ def main() -> None:
     if not script_path.exists():
         raise SystemExit(f"Script not found: {script_path}")
 
-    # argv[0] → training script path, argv[1:] → its args
-    sys.argv = [str(script_path)] + sys.argv[2:]
+    extra_args = sys.argv[2:]
 
-    # Patch trước khi exec
-    _patch_voxcpm2()
+    # Ghi sitecustomize.py vào thư mục tạm, thêm vào đầu PYTHONPATH
+    tmpdir = tempfile.mkdtemp(prefix="gc_wrapper_")
+    Path(tmpdir, "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
+    print(f"[GC_WRAPPER] sitecustomize.py written to {tmpdir}", flush=True)
 
-    # Exec training script trong __main__ namespace (giống chạy trực tiếp)
-    source = script_path.read_text(encoding="utf-8")
-    code = compile(source, str(script_path), "exec")
-    ns: dict = {"__name__": "__main__", "__file__": str(script_path)}
-    exec(code, ns)  # noqa: S102
+    env = os.environ.copy()
+    existing_pypath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = tmpdir + (":" + existing_pypath if existing_pypath else "")
+
+    # Chạy training script như subprocess bình thường — không exec/compile
+    cmd = [sys.executable, str(script_path)] + extra_args
+    print(f"[GC_WRAPPER] Running: {' '.join(cmd)}", flush=True)
+    result = subprocess.run(cmd, env=env)
+    sys.exit(result.returncode)
 
 
 if __name__ == "__main__":
