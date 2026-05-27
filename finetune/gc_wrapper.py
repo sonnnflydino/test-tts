@@ -95,6 +95,23 @@ _NONLOCAL_NEW = (
 )
 
 
+def _remove_old_injection(source: str) -> tuple[str, bool]:
+    """Xóa đoạn text-injection cũ (# === LOW-VRAM PATCH ===) nếu còn sót trong cache."""
+    start_marker = "# === LOW-VRAM PATCH: gradient checkpointing ==="
+    end_marker = "# === END PATCH ==="
+    if start_marker not in source:
+        return source, False
+    start_idx = source.find(start_marker)
+    end_idx = source.find(end_marker, start_idx)
+    if end_idx == -1:
+        end_idx = source.find("\n", start_idx)
+    else:
+        end_idx += len(end_marker) + 1  # bao gồm newline sau marker
+    cleaned = source[:start_idx] + source[end_idx:]
+    print("[GC_WRAPPER] Removed stale LOW-VRAM text-injection from cached script.", flush=True)
+    return cleaned, True
+
+
 def _fix_nonlocal(source: str) -> tuple[str, bool]:
     """Fix nonlocal bug. Trả về (fixed_source, was_changed)."""
     if "nonlocal train_iter, data_epoch" not in source:
@@ -104,13 +121,9 @@ def _fix_nonlocal(source: str) -> tuple[str, bool]:
         print("[GC_WRAPPER] Applying full nonlocal→dict fix.", flush=True)
         return source.replace(_NONLOCAL_OLD, _NONLOCAL_NEW, 1), True
 
-    # Fallback: xóa dòng nonlocal + đổi assignments thành dict
-    print("[GC_WRAPPER] Applying fallback nonlocal fix (remove nonlocal line).", flush=True)
-    fixed = source
-    # Bước 1: xóa dòng nonlocal
-    fixed = fixed.replace("        nonlocal train_iter, data_epoch\n", "", 1)
-    # Bước 2: đổi assignments bên trong get_next_batch thành dict access
-    # (không thể làm chính xác nếu không biết chính xác indentation)
+    # Fallback: chỉ xóa dòng nonlocal
+    print("[GC_WRAPPER] Applying fallback nonlocal fix (remove nonlocal line only).", flush=True)
+    fixed = source.replace("        nonlocal train_iter, data_epoch\n", "", 1)
     return fixed, True
 
 
@@ -130,14 +143,21 @@ def main() -> None:
     shutil.copy2(drive_script, local_script)
     print(f"[GC_WRAPPER] Copied script to {local_script}", flush=True)
 
-    # ── Bước 2: đọc từ /tmp và fix nonlocal bug ──
+    # ── Bước 2: đọc từ /tmp, dọn sạch injection cũ, fix nonlocal bug ──
     source = local_script.read_text(encoding="utf-8")
-    fixed_source, was_fixed = _fix_nonlocal(source)
-    if was_fixed:
-        local_script.write_text(fixed_source, encoding="utf-8")
-        print(f"[GC_WRAPPER] nonlocal bug fixed in local copy.", flush=True)
+    any_change = False
+
+    source, changed = _remove_old_injection(source)
+    any_change = any_change or changed
+
+    source, changed = _fix_nonlocal(source)
+    any_change = any_change or changed
+
+    if any_change:
+        local_script.write_text(source, encoding="utf-8")
+        print("[GC_WRAPPER] Script patched and saved to local copy.", flush=True)
     else:
-        print("[GC_WRAPPER] No nonlocal bug found — script looks clean.", flush=True)
+        print("[GC_WRAPPER] Script looks clean — no patches needed.", flush=True)
 
     # ── Bước 3: sitecustomize.py cho gradient checkpointing ──
     Path(tmpdir, "sitecustomize.py").write_text(_SITECUSTOMIZE, encoding="utf-8")
