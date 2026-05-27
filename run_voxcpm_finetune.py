@@ -75,6 +75,49 @@ def ensure_upstream_script(script_path: Path, refresh: bool) -> None:
         script_path.write_bytes(response.read())
 
 
+# Đoạn code inject vào upstream script để enable gradient checkpointing
+_GRADIENT_CHECKPOINTING_PATCH = '''
+# === LOW-VRAM PATCH: gradient checkpointing ===
+try:
+    _m = unwrapped_model
+    # Thử trực tiếp trên model
+    if hasattr(_m, "gradient_checkpointing_enable"):
+        _m.gradient_checkpointing_enable()
+        print("[PATCH] gradient_checkpointing_enable() on model OK")
+    # Thử trên base_lm (MiniCPM transformer bên trong)
+    if hasattr(_m, "base_lm"):
+        _lm = _m.base_lm
+        if hasattr(_lm, "gradient_checkpointing_enable"):
+            _lm.gradient_checkpointing_enable()
+            print("[PATCH] gradient_checkpointing_enable() on base_lm OK")
+        elif hasattr(_lm, "model") and hasattr(_lm.model, "gradient_checkpointing_enable"):
+            _lm.model.gradient_checkpointing_enable()
+            print("[PATCH] gradient_checkpointing_enable() on base_lm.model OK")
+    del _m
+except Exception as _e:
+    print(f"[PATCH] gradient_checkpointing patch skipped: {_e}")
+# === END PATCH ===
+'''
+
+
+def patch_upstream_for_gradient_checkpointing(script_path: Path) -> None:
+    """Inject gradient checkpointing ngay sau unwrapped_model.train() trong upstream script."""
+    source = script_path.read_text(encoding="utf-8")
+    marker = "unwrapped_model.train()"
+    if _GRADIENT_CHECKPOINTING_PATCH.strip() in source:
+        return  # đã patch rồi
+    if marker not in source:
+        print(f"[WARN] Could not find '{marker}' in upstream script — skipping patch.")
+        return
+    patched = source.replace(
+        marker,
+        marker + "\n" + _GRADIENT_CHECKPOINTING_PATCH,
+        1,  # chỉ replace lần đầu tiên
+    )
+    script_path.write_text(patched, encoding="utf-8")
+    print(f"[PATCH] Gradient checkpointing patch applied to {script_path}")
+
+
 def resolve_config_paths(config: dict, repo_root: Path, cache_dir: Path) -> dict:
     resolved = dict(config)
     pretrained_value = str(config["pretrained_path"])
@@ -129,6 +172,8 @@ def main() -> None:
 
     recommended_min_vram_gb = 20 if config.get("lora") else 40
     ensure_upstream_script(upstream_script, refresh=args.refresh_upstream)
+    if args.allow_low_vram:
+        patch_upstream_for_gradient_checkpointing(upstream_script)
     resolved = resolve_config_paths(config=config, repo_root=repo_root, cache_dir=cache_dir)
 
     if torch.cuda.is_available():
@@ -153,6 +198,9 @@ def main() -> None:
 
     env = os.environ.copy()
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
+    if args.allow_low_vram:
+        # Giảm memory fragmentation trên GPU nhỏ (khuyến nghị của PyTorch khi OOM)
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     subprocess.run(
         [sys.executable, str(upstream_script), "--config_path", str(resolved_config_path)],
         cwd=str(repo_root),
