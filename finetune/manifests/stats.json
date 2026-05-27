@@ -1,6 +1,6 @@
 {
-  "dataset_dir": "/home/alan/Workspace/enger/test-tts/datasets/cosrigel_north_female",
-  "output_dir": "/home/alan/Workspace/enger/test-tts/finetune/manifests",
+  "dataset_dir": "D:\\WorkSpace\\Alan\\Projects\\test-tts\\datasets\\cosrigel_north_female",
+  "output_dir": "D:\\WorkSpace\\Alan\\Projects\\test-tts\\finetune\\manifests",
   "min_duration": 3.0,
   "max_duration": 30.0,
   "ref_audio_ratio": 0.4,

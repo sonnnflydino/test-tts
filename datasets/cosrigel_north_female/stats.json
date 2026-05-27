@@ -4,7 +4,7 @@
   "samples": 486,
   "train_samples": 461,
   "val_samples": 25,
-  "total_seconds": 12020.149999999987,
-  "total_hours": 3.3389305555555517,
+  "total_seconds": 12020.15,
+  "total_hours": 3.3389305555555553,
   "reference_file": "00476.wav"
 }
